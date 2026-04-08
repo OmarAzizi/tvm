@@ -1254,5 +1254,108 @@ def test_resize_nearest_neighbor(input_shape, output_size, tf_op, coordinate_tra
     verify(ResizeNearest, expected)
 
 
+@pytest.mark.parametrize(
+    "input_shape, begin, size",
+    [
+        ((4, 6), [1, 2], [2, 3]),
+        ((2, 8, 6), [0, 2, 1], [2, 4, 3]),
+    ],
+)
+def test_slice(input_shape, begin, size):
+    """SLICE: constant begin/size -> R.strided_slice with unit strides."""
+    end = [b + s for b, s in zip(begin, size)]
+    axes = list(range(len(begin)))
+ 
+    class Slice(tf.Module):
+        @tf.function(
+            input_signature=[tf.TensorSpec(shape=input_shape, dtype=tf.float32)]
+        )
+        def func(self, x):
+            return tf.slice(x, begin=begin, size=size)
+ 
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo(input_shape, "float32"))
+    out_shape = tuple(size)
+    with bb.function("main", [x]):
+        with bb.dataflow():
+            gv = bb.emit_output(
+                relax.op.strided_slice(
+                    x,
+                    axes=axes,
+                    begin=[int(v) for v in begin],
+                    end=[int(v) for v in end],
+                )
+            )
+        bb.emit_func_output(gv)
+    expected = bb.get()
+    expected["main"] = expected["main"].with_attr("num_input", 1)
+ 
+    verify(Slice, expected)
+ 
+ 
+@pytest.mark.parametrize(
+    "input_shape",
+    [
+        (2, 8),
+        (1, 4, 4, 16),
+    ],
+)
+def test_l2_normalization(input_shape):
+    """L2_NORMALIZATION: normalize over last axis, decomposed into primitives."""
+    last_axis = len(input_shape) - 1
+ 
+    class L2Norm(tf.Module):
+        @tf.function(
+            input_signature=[tf.TensorSpec(shape=input_shape, dtype=tf.float32)]
+        )
+        def func(self, x):
+            return tf.math.l2_normalize(x, axis=last_axis)
+ 
+    bb = relax.BlockBuilder()
+    x = relax.Var("x", relax.TensorStructInfo(input_shape, "float32"))
+    with bb.function("main", [x]):
+        with bb.dataflow():
+            lv = bb.emit(relax.op.multiply(x, x))
+            lv1 = bb.emit(relax.op.sum(lv, axis=[last_axis], keepdims=True))
+            lv2 = bb.emit(relax.op.add(lv1, relax.const(9.999999960041972e-13, "float32")))
+            lv3 = bb.emit(relax.op.sqrt(lv2))
+            gv = bb.emit_output(relax.op.divide(x, lv3))
+        bb.emit_func_output(gv)
+    expected = bb.get()
+    expected["main"] = expected["main"].with_attr("num_input", 1)
+ 
+    verify(L2Norm, expected)
+ 
+ 
+@pytest.mark.parametrize(
+    "input_shape, axis",
+    [
+        ((3, 5), 1),
+        ((4, 6), 0),
+    ],
+)
+def test_reverse_v2(input_shape, axis):
+    """REVERSE_V2: flip along a single axis -> R.flip."""
+ 
+    class ReverseV2(tf.Module):
+        @tf.function(
+            input_signature=[tf.TensorSpec(shape=input_shape, dtype=tf.float32)]
+        )
+        def func(self, x):
+            return tf.reverse(x, axis=[axis])
+ 
+    @I.ir_module
+    class Expected:
+        @R.function
+        def main(x: R.Tensor(input_shape, dtype="float32")) -> R.Tensor(input_shape, dtype="float32"):
+            R.func_attr({"num_input": 1})
+            with R.dataflow():
+                gv: R.Tensor(input_shape, dtype="float32") = R.flip(x, axis=axis)
+                R.output(gv)
+            return gv
+ 
+    verify(ReverseV2, Expected)
+
+
 if __name__ == "__main__":
     pytest.main(["-s", __file__])
